@@ -1,15 +1,13 @@
 # Vimith
+# Vimith — Ultimate C++20 Modal Editor
 ## Interface Preview
-
+---
 | Text Editing Mode (NORMAL) | Binary/Hex Mode (:hex) |
 |----------------------------|-------------------------|
 | ![Text Mode](Знімок%20екрана%202026-03-18%20143758.png) | ![Hex Mode](Знімок%20екрана%202026-03-18%20143716.png) |
-
 ---
-<<<<<<< HEAD
 Vimith is Vim but have more function
-=======
-
+---
 A modal terminal editor for text and binary/hex, built on C++20.
 Inspired by Vim. Designed for performance-first use on AMD Ryzen 5 7600X.
 
