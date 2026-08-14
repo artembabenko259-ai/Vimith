@@ -29,6 +29,27 @@ FetchContent_Declare(Catch2
 )
 FetchContent_MakeAvailable(Catch2)
 
+# ── Zydis (x86-64 disassembler) ───────────────────────────────────────────────
+# Not shallow-cloned: Zydis pulls in Zycore as a git submodule, and shallow
+# submodule fetches are unreliable across git versions.
+FetchContent_Declare(zydis
+    GIT_REPOSITORY https://github.com/zyantific/zydis.git
+    GIT_TAG        v4.1.0
+)
+set(ZYDIS_BUILD_TOOLS      OFF CACHE BOOL "" FORCE)
+set(ZYDIS_BUILD_EXAMPLES   OFF CACHE BOOL "" FORCE)
+set(ZYDIS_BUILD_SHARED_LIB OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(zydis)
+
+# ── nlohmann/json (MCP server's JSON-RPC encoding) ────────────────────────────
+FetchContent_Declare(json
+    GIT_REPOSITORY https://github.com/nlohmann/json.git
+    GIT_TAG        v3.11.3
+    GIT_SHALLOW    TRUE
+)
+set(JSON_BuildTests OFF CACHE INTERNAL "")
+FetchContent_MakeAvailable(json)
+
 # ── vimith_core  (PieceTable, BufferManager, MmapBuffer stub) ────────────────
 add_library(vimith_core STATIC
     src/core/piece_table.cpp
@@ -60,11 +81,29 @@ add_library(vimith_syntax STATIC
 target_include_directories(vimith_syntax PUBLIC include)
 target_link_libraries(vimith_syntax PUBLIC vimith_options)
 
-# ── vimith_rendering  (Renderer, TextView, HexView — depends on ftxui) ───────
+# ── vimith_disasm  (Zydis-backed x86-64 decoder) ─────────────────────────────
+add_library(vimith_disasm STATIC
+    src/disasm/disassembler.cpp
+)
+target_include_directories(vimith_disasm PUBLIC include)
+target_link_libraries(vimith_disasm PUBLIC vimith_options Zydis)
+
+# ── vimith_mcp  (MCP server: exposes the live buffer as tools over HTTP) ─────
+if(WIN32)
+    add_library(vimith_mcp STATIC src/mcp/mcp_server_win32.cpp)
+    target_link_libraries(vimith_mcp PUBLIC ws2_32)
+else()
+    add_library(vimith_mcp STATIC src/mcp/mcp_server_stub.cpp)
+endif()
+target_include_directories(vimith_mcp PUBLIC include)
+target_link_libraries(vimith_mcp PUBLIC vimith_core vimith_disasm nlohmann_json::nlohmann_json)
+
+# ── vimith_rendering  (Renderer, TextView, HexView, DisasmView — needs ftxui) ─
 add_library(vimith_rendering STATIC
     src/rendering/renderer.cpp
     src/rendering/text_view.cpp
     src/rendering/hex_view.cpp
+    src/rendering/disasm_view.cpp
 )
 target_include_directories(vimith_rendering PUBLIC include)
 target_link_libraries(vimith_rendering PUBLIC
@@ -72,6 +111,8 @@ target_link_libraries(vimith_rendering PUBLIC
     vimith_input
     vimith_command
     vimith_syntax
+    vimith_disasm
+    vimith_mcp
     ftxui::screen
     ftxui::dom
     ftxui::component

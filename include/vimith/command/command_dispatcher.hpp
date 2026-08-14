@@ -37,9 +37,20 @@ private:
     // Last change for '.' repeat
     Command m_lastChange{NoOp{}};
 
+    // ── Hex live-patch state ──────────────────────────────────────────────
+    // true = next hex digit typed writes the high nibble of the byte at
+    // m_state.hexOffset; false = low nibble (then the cursor auto-advances).
+    bool m_hexNibbleHigh = true;
+    void onHexNibbleInput(char c);
+
     // ── Cursor helpers ─────────────────────────────────────────────────────
     void clampCursor();
     void scrollToCursor();
+
+    // Routes movement/scroll commands to the hex byte-cursor (m_state.hexOffset)
+    // instead of the text cursor when the buffer is in Hex mode.
+    // Returns true if the command was handled this way.
+    bool dispatchHexMovement(const Command& cmd);
 
     // Move cursor by (dLine, dCol); clamped to buffer bounds
     void moveCursorBy(int dLine, int dCol);

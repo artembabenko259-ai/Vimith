@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <sstream>
 #include <string>
 
@@ -19,9 +20,49 @@ CommandDispatcher::CommandDispatcher(EditorState&         state,
 // ── Main dispatch ────────────────────────────────────────────────────────────
 
 bool CommandDispatcher::dispatch(const Command& cmd) {
+    if (m_buf.getMode() == BufferMode::Hex && dispatchHexMovement(cmd)) {
+        return m_state.running;
+    }
     std::visit([this](const auto& c) { on(c); }, cmd);
     scrollToCursor();
     return m_state.running;
+}
+
+// ── Hex-mode byte cursor ──────────────────────────────────────────────────
+
+namespace {
+// Mirrors vimith::rendering::kHexBytesPerRow. Kept as a local constant here
+// so vimith_command doesn't need to depend on the ftxui-linked rendering lib.
+constexpr std::size_t kHexBytesPerRow = 16;
+} // namespace
+
+bool CommandDispatcher::dispatchHexMovement(const Command& cmd) {
+    const std::size_t fileSize = m_buf.fileSize();
+    if (fileSize == 0) return false;
+
+    auto setOffset = [&](long long v) {
+        v = std::clamp<long long>(v, 0, static_cast<long long>(fileSize) - 1);
+        m_state.hexOffset    = static_cast<std::size_t>(v);
+        m_hexNibbleHigh = true; // navigating away abandons a half-typed byte edit
+    };
+    const long long cur = static_cast<long long>(m_state.hexOffset);
+    const long long row = static_cast<long long>(kHexBytesPerRow);
+
+    if (auto* p = std::get_if<MoveLeft>(&cmd))       { setOffset(cur - p->count); return true; }
+    if (auto* p = std::get_if<MoveRight>(&cmd))      { setOffset(cur + p->count); return true; }
+    if (auto* p = std::get_if<MoveUp>(&cmd))         { setOffset(cur - row * p->count); return true; }
+    if (auto* p = std::get_if<MoveDown>(&cmd))       { setOffset(cur + row * p->count); return true; }
+    if (std::get_if<MoveLineStart>(&cmd))            { setOffset((cur / row) * row); return true; }
+    if (std::get_if<MoveLineEnd>(&cmd))              { setOffset((cur / row) * row + row - 1); return true; }
+    if (std::get_if<MoveFirstNonBlank>(&cmd))        { setOffset((cur / row) * row); return true; }
+    if (std::get_if<MoveFileStart>(&cmd))            { setOffset(0); return true; }
+    if (std::get_if<MoveFileEnd>(&cmd))              { setOffset(static_cast<long long>(fileSize) - 1); return true; }
+    if (std::get_if<ScrollHalfPageUp>(&cmd))         { setOffset(cur - row * 8); return true; }
+    if (std::get_if<ScrollHalfPageDown>(&cmd))       { setOffset(cur + row * 8); return true; }
+    if (std::get_if<ScrollPageUp>(&cmd))             { setOffset(cur - row * 16); return true; }
+    if (std::get_if<ScrollPageDown>(&cmd))           { setOffset(cur + row * 16); return true; }
+
+    return false; // not a movement command – fall through to normal dispatch
 }
 
 // ── Cursor helpers ────────────────────────────────────────────────────────────
@@ -373,6 +414,12 @@ void CommandDispatcher::on(const ScrollPageDown&) {
 // ── Mode transitions ──────────────────────────────────────────────────────────
 
 void CommandDispatcher::on(const EnterInsert& cmd) {
+    if (m_buf.getMode() == BufferMode::Hex) {
+        m_hexNibbleHigh = true;
+        m_state.statusMessage = "-- HEX PATCH -- (type hex digits, Esc to stop)";
+        return;
+    }
+
     switch (cmd.where) {
         case InsertWhere::AfterCursor: {
             const std::size_t llen = currentLineLen();
@@ -398,6 +445,10 @@ void CommandDispatcher::on(const EnterInsert& cmd) {
 }
 
 void CommandDispatcher::on(const LeaveInsert&) {
+    if (m_buf.getMode() == BufferMode::Hex) {
+        m_state.statusMessage = "-- HEX MODE --";
+        return;
+    }
     // Adjust cursor one left (Vim behaviour: cursor lands on last inserted char)
     if (m_state.cursor.col > 0) --m_state.cursor.col;
     clampCursor();
@@ -431,6 +482,11 @@ void CommandDispatcher::on(const EnterSearch& cmd) {
 // ── Editing handlers ──────────────────────────────────────────────────────────
 
 void CommandDispatcher::on(const InsertChar& cmd) {
+    if (m_buf.getMode() == BufferMode::Hex) {
+        onHexNibbleInput(cmd.c);
+        return;
+    }
+
     const std::size_t off = cursorOffset();
     m_buf.insert(off, std::string_view{&cmd.c, 1});
 
@@ -439,6 +495,31 @@ void CommandDispatcher::on(const InsertChar& cmd) {
         m_state.cursor.col = 0;
     } else {
         ++m_state.cursor.col;
+    }
+}
+
+void CommandDispatcher::onHexNibbleInput(char c) {
+    int nibble = -1;
+    if (c >= '0' && c <= '9')      nibble = c - '0';
+    else if (c >= 'a' && c <= 'f') nibble = 10 + (c - 'a');
+    else if (c >= 'A' && c <= 'F') nibble = 10 + (c - 'A');
+    if (nibble < 0) return; // ignore non-hex keys while hex-patching
+
+    const auto        cur  = m_buf.readBytes(m_state.hexOffset, 1);
+    std::uint8_t       byte = cur.empty() ? 0 : cur[0];
+    const std::uint8_t n    = static_cast<std::uint8_t>(nibble);
+
+    if (m_hexNibbleHigh) {
+        byte = static_cast<std::uint8_t>((n << 4) | (byte & 0x0F));
+        m_buf.writeByte(m_state.hexOffset, byte);
+        m_hexNibbleHigh = false;
+    } else {
+        byte = static_cast<std::uint8_t>((byte & 0xF0) | n);
+        m_buf.writeByte(m_state.hexOffset, byte);
+        m_hexNibbleHigh = true;
+
+        const std::size_t sz = m_buf.fileSize();
+        if (sz > 0) m_state.hexOffset = std::min(m_state.hexOffset + 1, sz - 1);
     }
 }
 
@@ -801,9 +882,10 @@ void CommandDispatcher::on(const OpenFile& cmd) {
     if (cmd.path.empty()) return;
     const bool ok = m_buf.openFile(cmd.path);
     if (ok) {
-        m_state.filename = cmd.path;
-        m_state.cursor   = {0, 0};
-        m_state.topLine  = 0;
+        m_state.filename  = cmd.path;
+        m_state.cursor    = {0, 0};
+        m_state.topLine   = 0;
+        m_state.hexOffset = 0;
         m_state.statusMessage = "Opened \"" + cmd.path + "\"";
     } else {
         m_state.statusMessage = "E: cannot open \"" + cmd.path + "\"";
@@ -895,6 +977,8 @@ void CommandDispatcher::applySetOption(const std::string& name,
     else if (name == "noexpandtab" || name == "noet") m_state.options.expandTabs = false;
     else if (name == "hlsearch" || name == "hls") m_state.options.hlSearch = boolVal(true);
     else if (name == "ignorecase" || name == "ic") m_state.options.ignoreCase = boolVal(true);
+    else if (name == "asm")   m_state.options.showDisasm = boolVal(true);
+    else if (name == "noasm") m_state.options.showDisasm = false;
     else {
         m_state.statusMessage = "E: unknown option: " + name;
     }
@@ -904,6 +988,8 @@ void CommandDispatcher::applySetOption(const std::string& name,
 
 void CommandDispatcher::on(const SwitchToHexMode&) {
     m_buf.switchMode(BufferMode::Hex);
+    const std::size_t sz = m_buf.fileSize();
+    m_state.hexOffset = sz > 0 ? std::min(m_state.hexOffset, sz - 1) : 0;
     m_state.statusMessage = "-- HEX MODE --";
 }
 

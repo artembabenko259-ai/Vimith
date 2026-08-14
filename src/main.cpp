@@ -4,6 +4,7 @@
 #include "vimith/command/command_dispatcher.hpp"
 #include "vimith/syntax/highlight_engine.hpp"
 #include "vimith/rendering/renderer.hpp"
+#include "vimith/mcp/mcp_server.hpp"
 
 #ifdef _WIN32
 #  include "vimith/platform/win32_platform.hpp"
@@ -13,9 +14,11 @@ using PlatformImpl = vimith::platform::Win32Platform;
 using PlatformImpl = vimith::platform::UnixPlatform;
 #endif
 
+#include <cstdint>
 #include <cstring>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <string_view>
 
@@ -29,6 +32,8 @@ void printUsage(const char* progName) {
         << "\n"
         << "Options:\n"
         << "  --hex       Open FILE in hex/binary mode\n"
+        << "  --mcp[=PORT] Start an MCP server (default port 7777) on 127.0.0.1\n"
+        << "              so any MCP client can read/patch the open file live\n"
         << "  --version   Print version and exit\n"
         << "  --help      Print this message and exit\n"
         << "\n"
@@ -47,9 +52,11 @@ void printUsage(const char* progName) {
 
 int main(int argc, char* argv[]) {
     // ── Argument parsing ───────────────────────────────────────────────────
-    std::string openPath;
-    bool        hexMode   = false;
-    bool        showHelp  = false;
+    std::string    openPath;
+    bool           hexMode   = false;
+    bool           showHelp  = false;
+    bool           mcpEnabled = false;
+    std::uint16_t  mcpPort    = 7777;
 
     for (int i = 1; i < argc; ++i) {
         std::string_view arg{argv[i]};
@@ -59,6 +66,14 @@ int main(int argc, char* argv[]) {
             std::cout << "Vimith 0.1.0\n"; return 0;
         }
         if (arg == "--hex") { hexMode = true; continue; }
+        if (arg == "--mcp" || arg.rfind("--mcp=", 0) == 0) {
+            mcpEnabled = true;
+            if (const auto eq = arg.find('='); eq != std::string_view::npos) {
+                try { mcpPort = static_cast<std::uint16_t>(std::stoul(std::string{arg.substr(eq + 1)})); }
+                catch (...) { /* keep default port on malformed value */ }
+            }
+            continue;
+        }
 
         // Treat anything not starting with '-' as a file path
         if (!arg.empty() && arg[0] != '-') {
@@ -99,10 +114,28 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // ── MCP server (optional) ────────────────────────────────────────────────
+    // Shared with Renderer: both lock this before touching state/*bufMgr, since
+    // MCP tool calls run on a background thread while the render loop runs on
+    // the main thread.
+    std::mutex uiMutex;
+    vimith::mcp::McpServer mcpServer{state, *bufMgr, uiMutex};
+
+    if (mcpEnabled) {
+        if (mcpServer.start(mcpPort)) {
+            state.statusMessage =
+                "MCP server listening on http://127.0.0.1:" + std::to_string(mcpPort) + "/mcp";
+        } else {
+            std::cerr << "warning: --mcp requested but the server failed to start "
+                         "(port in use, or unsupported on this platform)\n";
+        }
+    }
+
     // ── Renderer + event loop ──────────────────────────────────────────────
     vimith::rendering::Renderer renderer{
-        state, *bufMgr, *modeMgr, *dispatcher, *hlEngine
+        state, *bufMgr, *modeMgr, *dispatcher, *hlEngine, uiMutex
     };
+    if (mcpServer.running()) renderer.attachMcpServer(&mcpServer);
 
     renderer.loop();
 

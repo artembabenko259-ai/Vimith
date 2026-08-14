@@ -21,6 +21,20 @@ struct HexCursor {
 };
 
 // ---------------------------------------------------------------------------
+// hexTopRowOffset
+//
+// Computes the byte offset of the first visible row for a given cursor
+// position, keeping the cursor vertically centered. Shared by HexView and
+// DisasmView so their scroll windows stay in lockstep frame to frame.
+// ---------------------------------------------------------------------------
+[[nodiscard]] inline std::size_t hexTopRowOffset(std::size_t cursorOffset,
+                                                  std::size_t visRows) {
+    const std::size_t cursorRow = cursorOffset / kHexBytesPerRow;
+    const std::size_t topRow    = (cursorRow >= visRows / 2) ? cursorRow - visRows / 2 : 0;
+    return topRow * kHexBytesPerRow;
+}
+
+// ---------------------------------------------------------------------------
 // renderHexView
 //
 // Builds the classic dual-pane hex editor layout:

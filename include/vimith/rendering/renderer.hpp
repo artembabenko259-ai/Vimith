@@ -7,10 +7,13 @@
 #include "vimith/command/command_dispatcher.hpp"
 #include "vimith/syntax/highlight_engine.hpp"
 #include "vimith/rendering/hex_view.hpp"
+#include "vimith/rendering/disasm_view.hpp"
+#include "vimith/mcp/mcp_server.hpp"
 
 #include <ftxui/component/event.hpp>
 
 #include <memory>
+#include <mutex>
 #include <optional>
 
 namespace vimith::rendering {
@@ -36,7 +39,8 @@ public:
              core::BufferManager&     buf,
              input::ModeManager&      modes,
              command::CommandDispatcher& dispatcher,
-             syntax::HighlightEngine& highlightEngine);
+             syntax::HighlightEngine& highlightEngine,
+             std::mutex&              uiMutex);
 
     ~Renderer() = default;
 
@@ -46,14 +50,19 @@ public:
     // Resize notification (called on terminal resize events by ftxui)
     void onResize(int width, int height);
 
+    // Optional: if set, the render loop wires up mcpServer's redraw callback
+    // so tool calls handled on the MCP thread wake the UI immediately
+    // instead of waiting for the next keystroke. Must be called before loop().
+    void attachMcpServer(mcp::McpServer* mcpServer) { m_mcpServer = mcpServer; }
+
 private:
     EditorState&                m_state;
     core::BufferManager&        m_buf;
     input::ModeManager&         m_modes;
     command::CommandDispatcher& m_dispatcher;
     syntax::HighlightEngine&    m_hl;
-
-    HexCursor                   m_hexCursor;
+    std::mutex&                 m_uiMutex;
+    mcp::McpServer*             m_mcpServer = nullptr;
 
     // Build the complete UI tree for the current frame
     ftxui::Element buildUI();

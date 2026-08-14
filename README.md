@@ -18,6 +18,9 @@ Inspired by Vim. Designed for performance-first use on AMD Ryzen 5 7600X.
 - **Vim-style modal editing** — Normal / Insert / Visual / Command / Search modes
 - **Piece Table** text buffer — O(log n) edits, unlimited undo/redo
 - **Hex/Binary mode** — memory-mapped view via WinAPI (`CreateFileMapping`) on Windows
+- **Live x86-64 disassembler** — [Zydis](https://github.com/zyantific/zydis)-backed panel next to the hex view; decodes and follows the byte under the cursor as you move or edit
+- **Live binary patching** — in `:hex` mode, `i` enters byte-patch editing: type hex digits to overwrite bytes directly through the memory-mapped file, no separate save step, disassembly re-decodes on the next frame
+- **MCP server** — exposes the open file as [Model Context Protocol](https://modelcontextprotocol.io) tools (`read_bytes`, `disassemble`, `write_patch`, `search_bytes`, `set_cursor`, `get_status`) over loopback HTTP, so any MCP client (Claude Desktop, Claude Code, or your own agent) can read and patch the *same live buffer* you're watching — see [MCP server](#mcp-server) below
 - **Syntax highlighting** — pluggable engine with built-in C++, Rust, and Python tokenizers
 - **Non-blocking I/O** — file save dispatched to background thread; render thread never blocks
 - **ftxui rendering** — retained-mode component tree, handles terminal resize automatically
@@ -131,6 +134,63 @@ Examples:
 | `:set nonumber` | Hide line numbers              |
 | `:set rnu`    | Relative line numbers           |
 | `:set ts=4`   | Set tab stop size               |
+| `:set noasm`  | Hide the disassembly panel in `:hex` mode |
+| `:set asm`    | Show the disassembly panel in `:hex` mode (default) |
+
+### Hex mode
+
+`hjkl`, arrows, `0`/`$`, `gg`/`G`, `Ctrl+u/d/b/f` move the byte cursor instead
+of the text cursor. The disassembly panel decodes x86-64 instructions starting
+at the top-left visible byte and highlights whichever instruction contains
+the byte under the cursor, updating live as you move or scroll.
+
+Press `i` to enter **hex-patch editing**: type `0-9`/`a-f` to overwrite the
+high then low nibble of the byte under the cursor — each completed byte
+auto-advances the cursor, like a classic hex editor. Writes go straight
+through the memory-mapped file (`MmapBuffer::writeByte`); there is no undo
+for hex edits, and `:w` flushes them to disk. `Esc` returns to navigation.
+
+---
+
+## MCP server
+
+Vimith can expose the file you have open as a [Model Context Protocol](https://modelcontextprotocol.io)
+server, so any MCP client — Claude Desktop, Claude Code, or a custom
+agent — can read and **patch the exact live buffer you're watching** over
+loopback HTTP:
+
+```powershell
+vimith --mcp firmware.bin --hex          # http://127.0.0.1:7777/mcp
+vimith --mcp=8899 firmware.bin --hex     # custom port
+```
+
+Point an MCP client at `http://127.0.0.1:<port>/mcp` (Streamable HTTP
+transport, JSON-RPC 2.0). Available tools:
+
+| Tool | Effect |
+|------|--------|
+| `get_status` | File path, size, cursor offset, dirty flag |
+| `read_bytes` | Read raw bytes (hex + ASCII) at an offset |
+| `disassemble` | Decode x86-64 instructions from an offset |
+| `search_bytes` | Find occurrences of a hex byte pattern |
+| `set_cursor` | Move the visible hex/disasm cursor (visual feedback only) |
+| `write_patch` | Overwrite bytes at an offset — **writes immediately, no confirmation, no undo** |
+
+Design notes / limitations:
+
+- **Full write autonomy, by design.** `write_patch` applies the moment the
+  tool call is handled — there is no confirmation prompt on the Vimith side
+  and no undo. If you want a review step, put it in the MCP *client* (most
+  agent UIs already ask before running a write-shaped tool).
+- **Loopback only.** The listener binds `127.0.0.1` exclusively and is never
+  reachable from the network. It also validates the `Origin` header on any
+  request that sends one, to block browser-based DNS-rebinding.
+- **No auth.** Anything that can reach the port can call every tool. Don't
+  leave `--mcp` running unattended on a shared machine.
+- Implemented on Windows (Winsock2) only for now; `--mcp` is a no-op stub
+  on the POSIX build until the Linux port (Phase 7) lands.
+- Single JSON-RPC response per request — no server-initiated SSE stream —
+  which is sufficient for this server's synchronous, fast tool calls.
 
 ---
 
@@ -142,7 +202,9 @@ Vimith/
 │   ├── core/           PieceTable · MmapBuffer · BufferManager
 │   ├── input/          KeyEvent · InputHandler (lock-free ring) · ModeManager
 │   ├── command/        i_command.hpp (Command variant) · CommandDispatcher
-│   ├── rendering/      Renderer · TextView · HexView
+│   ├── rendering/      Renderer · TextView · HexView · DisasmView
+│   ├── disasm/         Disassembler (Zydis-backed x86-64 decoder)
+│   ├── mcp/            McpServer (loopback MCP/JSON-RPC tool server)
 │   ├── syntax/         IHighlighter · HighlightEngine · C++/Rust/Python
 │   └── platform/       IPlatform · Win32Platform · UnixPlatform
 ├── src/                Implementations
@@ -163,9 +225,10 @@ Terminal key → ftxui CatchEvent
 
 ### Concurrency
 
-- **Main thread** — event loop, rendering, state mutation (zero shared mutable state across threads)
+- **Main thread** — event loop, rendering, state mutation
 - **File IO thread** — `BufferManager::saveAsync()` dispatches writes via `std::async(std::launch::async)`; caller gets a `std::future<bool>`
 - **InputHandler ring buffer** — `RingBuffer<KeyEvent, 512>` with `std::atomic` head/tail; usable from a separate producer thread without locks
+- **MCP accept-loop thread** (only when `--mcp` is passed) — `McpServer` handles HTTP connections and tool calls on a background thread; it and the main thread both lock a shared `std::mutex` (owned by `main()`, passed into both `Renderer` and `McpServer`) before touching `EditorState`/`BufferManager`. After a tool call mutates state, `McpServer` posts a custom event to the render loop so the UI wakes immediately instead of waiting for the next keystroke.
 
 ---
 
@@ -177,6 +240,8 @@ All fetched automatically by CMake `FetchContent`:
 |---------|---------|---------|
 | [FTXUI](https://github.com/ArthurSonzogni/FTXUI) | v5.0.0 | TUI rendering, event loop |
 | [Catch2](https://github.com/catchorg/Catch2) | v3.5.2 | Unit testing |
+| [Zydis](https://github.com/zyantific/zydis) | v4.1.0 | x86-64 disassembly |
+| [nlohmann/json](https://github.com/nlohmann/json) | v3.11.3 | MCP server JSON-RPC encoding |
 
 ---
 
@@ -189,6 +254,7 @@ All fetched automatically by CMake `FetchContent`:
 | 3 | ✅ Done | Full Vim motions · operators · visual mode |
 | 4 | ✅ Done | MmapBuffer (WinAPI) · HexView |
 | 5 | ✅ Done | HighlightEngine · C++ / Rust / Python tokenizers |
-| 6 | TODO  | tree-sitter integration · LSP client stub |
-| 7 | TODO  | Arch Linux port · termios raw mode |
->>>>>>> b77f45f (Vimith Engine Release: Piece Table, WinAPI mmap, C++20 Core)
+| 6 | ✅ Done | Live x86-64 disassembly panel (Zydis) · hex-mode cursor navigation |
+| 7 | ✅ Done | Live hex-patch editing (mmap write-through) · MCP server (Windows) |
+| 8 | TODO  | tree-sitter integration · LSP client stub |
+| 9 | TODO  | Arch Linux port · termios raw mode · MCP server on POSIX |

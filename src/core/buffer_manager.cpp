@@ -158,6 +158,11 @@ bool BufferManager::writeByte(std::size_t offset, uint8_t value) {
     return m_hex->writeByte(offset, value);
 }
 
+bool BufferManager::writeBytes(std::size_t offset, std::span<const uint8_t> data) {
+    if (m_mode != BufferMode::Hex) return false;
+    return m_hex->writeBytes(offset, data);
+}
+
 // ── Universal ────────────────────────────────────────────────────────────────
 
 std::size_t BufferManager::fileSize() const {

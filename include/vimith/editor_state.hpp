@@ -49,6 +49,7 @@ struct EditorOptions {
     bool wrapLines               = false;
     bool hlSearch                = true;   // highlight search matches
     bool ignoreCase              = false;
+    bool showDisasm              = true;   // live disassembly panel in :hex mode
 };
 
 // ---------------------------------------------------------------------------
@@ -62,6 +63,9 @@ struct EditorState {
     CursorPos   cursor;
     std::size_t topLine  = 0; // index of first visible line (vertical scroll)
     std::size_t leftCol  = 0; // index of first visible column (horizontal scroll)
+
+    // ── Hex / disassembly cursor ─────────────────────────────────────────
+    std::size_t hexOffset = 0; // absolute byte offset selected in :hex mode
 
     // ── Terminal dimensions ────────────────────────────────────────────────
     int termWidth  = 80;

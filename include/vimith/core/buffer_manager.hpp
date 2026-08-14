@@ -69,6 +69,7 @@ public:
     [[nodiscard]] std::span<const uint8_t> readBytes(std::size_t offset,
                                                       std::size_t length) const;
     bool writeByte(std::size_t offset, uint8_t value);
+    bool writeBytes(std::size_t offset, std::span<const uint8_t> data);
 
     // ── Universal ─────────────────────────────────────────────────────────
     [[nodiscard]] std::size_t fileSize() const;

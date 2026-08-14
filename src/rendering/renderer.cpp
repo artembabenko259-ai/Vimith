@@ -1,6 +1,7 @@
 #include "vimith/rendering/renderer.hpp"
 #include "vimith/rendering/text_view.hpp"
 #include "vimith/rendering/hex_view.hpp"
+#include "vimith/rendering/disasm_view.hpp"
 #include "vimith/input/mode_manager.hpp"
 
 #include <ftxui/component/component.hpp>
@@ -11,6 +12,7 @@
 #include <ftxui/screen/color.hpp>
 
 #include <algorithm>
+#include <cstdio>
 #include <functional>
 #include <optional>
 #include <string>
@@ -84,12 +86,14 @@ Renderer::Renderer(EditorState&                state,
                    core::BufferManager&        buf,
                    input::ModeManager&         modes,
                    command::CommandDispatcher& dispatcher,
-                   syntax::HighlightEngine&    hl)
+                   syntax::HighlightEngine&    hl,
+                   std::mutex&                 uiMutex)
     : m_state(state)
     , m_buf(buf)
     , m_modes(modes)
     , m_dispatcher(dispatcher)
     , m_hl(hl)
+    , m_uiMutex(uiMutex)
 {}
 
 // ── Status bar ────────────────────────────────────────────────────────────────
@@ -118,10 +122,16 @@ ftxui::Element Renderer::buildStatusBar() const {
     if (m_buf.isDirty()) fname += " [+]";
     const Element fileElem = text(" " + fname + " ");
 
-    const std::string posStr =
-        std::to_string(m_state.cursor.line + 1) + ":"
-      + std::to_string(m_state.cursor.col  + 1)
-      + "  " + std::to_string(m_buf.lineCount()) + "L";
+    std::string posStr;
+    if (m_buf.getMode() == core::BufferMode::Hex) {
+        char buf[24];
+        std::snprintf(buf, sizeof(buf), "0x%08zX", m_state.hexOffset);
+        posStr = std::string{buf} + "  " + std::to_string(m_buf.fileSize()) + "B";
+    } else {
+        posStr = std::to_string(m_state.cursor.line + 1) + ":"
+               + std::to_string(m_state.cursor.col  + 1)
+               + "  " + std::to_string(m_buf.lineCount()) + "L";
+    }
     const Element posElem = text(posStr + " ") | color(Color::White);
 
     return hbox({ modeElem, fileElem | flex, posElem })
@@ -164,7 +174,17 @@ ftxui::Element Renderer::buildUI() {
 
     Element editArea;
     if (m_buf.getMode() == core::BufferMode::Hex) {
-        editArea = renderHexView(m_state, m_buf, m_hexCursor, w, editHeight);
+        const HexCursor hexCursor{m_state.hexOffset, true};
+        Element hexPane = renderHexView(m_state, m_buf, hexCursor, w, editHeight);
+
+        if (m_state.options.showDisasm) {
+            const std::size_t visRows   = static_cast<std::size_t>(std::max(1, editHeight));
+            const std::size_t topOffset = hexTopRowOffset(hexCursor.byteOffset, visRows);
+            Element disasmPane = renderDisasmView(m_buf, topOffset, hexCursor, editHeight);
+            editArea = hbox({ hexPane | flex, separatorLight(), disasmPane | flex });
+        } else {
+            editArea = hexPane;
+        }
     } else {
         const std::string lang = syntax::HighlightEngine::detectLanguage(m_state.filename);
         const auto* hl         = m_hl.getHighlighter(lang);
@@ -186,6 +206,14 @@ void Renderer::loop() {
     // Keep a reference to exit closure so we can call it from event handler
     std::function<void()> exitLoop = screen.ExitLoopClosure();
 
+    // If an MCP server is attached, wire it so tool calls handled on its
+    // background thread wake this loop immediately: PostEvent() is
+    // thread-safe and forces a re-render even though Event::Custom isn't
+    // bound to anything in convertEvent() below.
+    if (m_mcpServer) {
+        m_mcpServer->setRedrawCallback([&screen] { screen.PostEvent(Event::Custom); });
+    }
+
     // ftxui::Renderer creates a component whose Render() calls our lambda.
     // ftxui::CatchEvent wraps it so we intercept all keyboard events.
 
@@ -193,6 +221,9 @@ void Renderer::loop() {
         // Update terminal dimensions from screen
         m_state.termWidth  = screen.dimx();
         m_state.termHeight = screen.dimy();
+        // Guards against the MCP server thread mutating EditorState/BufferManager
+        // mid-frame (e.g. a write_patch landing while we're building the hex view).
+        std::lock_guard<std::mutex> lock(m_uiMutex);
         return buildUI();
     });
 
@@ -203,8 +234,11 @@ void Renderer::loop() {
         auto ke = convertEvent(ev);
         if (!ke) return false;
 
-        const auto cmd = m_modes.processKey(*ke);
-        m_dispatcher.dispatch(cmd);
+        {
+            std::lock_guard<std::mutex> lock(m_uiMutex);
+            const auto cmd = m_modes.processKey(*ke);
+            m_dispatcher.dispatch(cmd);
+        }
 
         // Clear status message on the next keystroke after it was set
         // (so it shows for exactly one rendering cycle after the action)

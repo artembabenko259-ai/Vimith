@@ -46,14 +46,9 @@ ftxui::Element renderHexView(const EditorState&         state,
 
     const std::size_t bytesPerRow = kHexBytesPerRow;
 
-    // Determine scroll offset (topRow)
-    const std::size_t cursorRow = cursor.byteOffset / bytesPerRow;
+    // Determine scroll offset (topRow), keeping the cursor row visible
     const std::size_t visRows   = static_cast<std::size_t>(std::max(1, height));
-
-    // Simple scroll: keep cursor row visible
-    const std::size_t topRow = (cursorRow >= visRows / 2)
-        ? cursorRow - visRows / 2
-        : 0;
+    const std::size_t topRow    = hexTopRowOffset(cursor.byteOffset, visRows) / bytesPerRow;
     const std::size_t totalRows = (fileSize + bytesPerRow - 1) / bytesPerRow;
 
     Elements rows;
